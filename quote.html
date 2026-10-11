@@ -169,6 +169,14 @@ table.st input,table.st select{width:100%;height:32px;border:1px solid var(--inp
 .hint{color:var(--muted);font-size:12px;margin:8px 0 0}
 .toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);background:var(--ink);color:#fff;padding:10px 18px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:99}
 .toast.on{opacity:1}
+.drop{border:1.5px dashed var(--input);border-radius:12px;padding:22px 16px;text-align:center;color:var(--text);background:#fafbfd}
+.drop.over{border-color:var(--primary);background:var(--primary-weak)}
+.klabel{display:block;font-size:12px;color:var(--muted);margin-bottom:4px}
+table.kt{width:100%;border-collapse:collapse;table-layout:fixed;margin-top:10px}
+table.kt th{background:var(--head);font-weight:500;font-size:12px;padding:7px 4px}
+table.kt td{background:var(--rowbg);border-top:1px solid #fff;font-size:12px;padding:7px 4px;text-align:center;vertical-align:top;overflow-wrap:anywhere}
+table.kt td.src{text-align:left;color:var(--muted)}
+table.kt .warn{color:var(--danger)}
 #printArea{display:none}
 @page{size:A4;margin:10mm}
 @media print{
@@ -200,6 +208,7 @@ table.st input,table.st select{width:100%;height:32px;border:1px solid var(--inp
     <div class="tabs sub" id="subTabs"></div>
     <div class="bar">
       <button class="btn" id="btnAddLine">상품추가</button>
+      <button class="btn primary" id="btnKakao">카톡 주문 불러오기</button>
       <button class="btn tool danger" id="btnDelSel">선택 삭제</button>
     </div>
     <table class="order" id="rows">
@@ -294,6 +303,35 @@ table.st input,table.st select{width:100%;height:32px;border:1px solid var(--inp
     <input type="file" id="importFile" accept=".json" hidden>
     <button class="btn tool" id="btnFactory" style="margin-right:auto;color:var(--danger)">기본값 복원</button>
     <button class="btn primary" id="btnSetSave">저장</button>
+  </div>
+</div></div>
+
+<!-- 카톡 주문 불러오기 -->
+<div class="modal" id="kakaoModal"><div class="mbox">
+  <div class="mhead"><h2>카톡 주문 불러오기</h2><button class="ibtn" data-close>닫기</button></div>
+  <div class="mbody">
+    <div class="drop" id="kDrop">
+      <b>카카오톡 주문 캡처를 여기에 끌어 놓거나</b>
+      <div class="btns" style="justify-content:center;margin:10px 0 6px">
+        <button class="btn" id="kPick">사진 선택</button>
+        <span class="hint" style="margin:0;align-self:center">또는 캡처 후 Ctrl+V 붙여넣기 · 여러 장 가능</span>
+      </div>
+      <input type="file" id="kFile" accept="image/*" multiple hidden>
+    </div>
+    <div class="thumbs" id="kThumbs" style="margin-top:10px"></div>
+    <div class="field" style="margin-top:12px"><label class="klabel">카톡 대화 글자를 복사해 붙여 넣어도 됩니다 (선택)</label>
+      <textarea id="kText" class="inst" placeholder="예) 거실 180*150 암막롤 화이트 1개 / 안방 120*130 콤비 아이보리 2개"></textarea></div>
+    <div class="form" style="margin-top:12px">
+      <div class="full"><label>Claude API 키 <span id="kKeyState"></span></label><input id="kKey" type="password" placeholder="sk-ant-..." autocomplete="off"></div>
+    </div>
+    <p class="hint">키는 이 브라우저에만 저장되고, 사진과 글자는 Anthropic(Claude)으로만 보내집니다. 다른 사람과 같이 쓰는 컴퓨터에서는 다 쓴 뒤 키를 지우세요. <button class="ibtn" id="kKeyClear">키 지우기</button></p>
+    <div id="kStatus" class="hint"></div>
+    <div id="kResult"></div>
+  </div>
+  <div class="mfoot">
+    <button class="btn" id="kReset">다시</button>
+    <button class="btn primary" id="kRead">주문 읽기</button>
+    <button class="btn primary" id="kApply" hidden>선택한 줄 추가</button>
   </div>
 </div></div>
 
@@ -620,6 +658,149 @@ $('#penSave').onclick=()=>{
 };
 $('#btnSketch').onclick=()=>{$('#drawTools').style.display='';openDraw('sketch');};
 $('#btnSign').onclick=()=>{$('#drawTools').style.display='none';openDraw('sign');};
+
+/* ===== 카톡 주문 불러오기 (Claude가 캡처를 읽어 품목 줄로 바꿈) ===== */
+const SDK_URL='https://cdn.jsdelivr.net/npm/@anthropic-ai/sdk@0.128.0/+esm';
+let kImgs=[],kItems=[],kCust=null,AnthropicSDK=null;
+const keyGet=()=>{try{return localStorage.getItem('quote.apikey')||''}catch(e){return ''}};
+const keySet=v=>{try{v?localStorage.setItem('quote.apikey',v):localStorage.removeItem('quote.apikey')}catch(e){}};
+function kOpen(){kImgs=[];kItems=[];kCust=null;$('#kText').value='';$('#kKey').value=keyGet();kKeyState();kRender();$('#kStatus').textContent='';$('#kResult').innerHTML='';$('#kApply').hidden=true;$('#kRead').hidden=false;$('#kakaoModal').classList.add('on');}
+function kKeyState(){$('#kKeyState').textContent=keyGet()?'· 저장됨':'';}
+function kRender(){$('#kThumbs').innerHTML=kImgs.map((d,i)=>`<div class="thumb" style="background-image:url('${d.url}')"><span>${i+1}번 사진</span><button data-krm="${i}">✕</button></div>`).join('');}
+/* 긴 카톡 캡처는 글자가 뭉개지지 않게 세로로 나눠서 보냄 (조금씩 겹치게) */
+function kSlices(img){
+  const W=Math.min(img.width,1200),k=W/img.width,H=img.height*k,step=Math.round(W*1.6),out=[];
+  for(let y=0;y<H;y+=step-80){
+    const h=Math.min(step,H-y),c=document.createElement('canvas');c.width=W;c.height=h;
+    c.getContext('2d').drawImage(img,0,-y,W,H);out.push(c.toDataURL('image/jpeg',.85).split(',')[1]);
+    if(y+h>=H)break;
+  }
+  return out;
+}
+function kAdd(files){
+  [...files].filter(f=>f.type.startsWith('image/')).forEach(f=>{
+    const url=URL.createObjectURL(f),img=new Image();
+    img.onload=()=>{kImgs.push({url,parts:kSlices(img)});kRender();};img.src=url;
+  });
+}
+$('#btnKakao').onclick=kOpen;
+$('#kPick').onclick=()=>$('#kFile').click();
+$('#kFile').onchange=e=>{kAdd(e.target.files);e.target.value='';};
+$('#kThumbs').onclick=e=>{const i=e.target.dataset.krm;if(i!==undefined){kImgs.splice(+i,1);kRender();}};
+const kd=$('#kDrop');
+kd.ondragover=e=>{e.preventDefault();kd.classList.add('over');};
+kd.ondragleave=()=>kd.classList.remove('over');
+kd.ondrop=e=>{e.preventDefault();kd.classList.remove('over');kAdd(e.dataTransfer.files);};
+document.addEventListener('paste',e=>{if(!$('#kakaoModal').classList.contains('on'))return;const f=[...e.clipboardData.files];if(f.length){e.preventDefault();kAdd(f);}});
+$('#kKey').onchange=e=>{keySet(e.target.value.trim());kKeyState();};
+$('#kKeyClear').onclick=()=>{keySet('');$('#kKey').value='';kKeyState();toast('API 키를 지웠습니다');};
+$('#kReset').onclick=kOpen;
+
+/* 우리 단가표를 그대로 알려 줘야 이름이 맞게 나옴 */
+function kCatalog(){
+  return cfg.cats.map(c=>c.subs.map(s=>{
+    const mats=s.materials.map(m=>`[${m.type}] ${m.name} (색상: ${parseList(m.colors).map(x=>x.name).join(', ')})`).join(' / ');
+    const ex=(s.extras||[]).map(k=>`${k}=${cfg.extras[k].label}(${parseList(cfg.extras[k].items).map(x=>x.name).join('/')})`).join(', ');
+    return `- product_id "${c.id}/${s.id}": ${c.name} > ${s.name} | 계산 ${s.mode==='m2'?'가로×세로':s.mode==='width'?'가로 길이':'개수'} | 원단: ${mats}${ex?` | 선택 항목: ${ex}`:''}`;
+  }).join('\n')).join('\n');
+}
+function kSchema(){
+  const str={type:'string'};
+  return {type:'object',additionalProperties:false,required:['customer','items','notes'],properties:{
+    customer:{type:'object',additionalProperties:false,required:['name','phone','address'],properties:{name:str,phone:str,address:str}},
+    items:{type:'array',items:{type:'object',additionalProperties:false,
+      required:['product_id','material','color','location','width_cm','height_cm','qty','options','source_text'],
+      properties:{
+        product_id:{type:'string',enum:cfg.cats.flatMap(c=>c.subs.map(s=>`${c.id}/${s.id}`))},
+        material:str,color:str,location:str,width_cm:{type:'number'},height_cm:{type:'number'},qty:{type:'integer'},
+        options:{type:'array',items:{type:'object',additionalProperties:false,required:['key','value'],properties:{key:{type:'string',enum:Object.keys(cfg.extras)},value:str}}},
+        source_text:str}}},
+    notes:{type:'array',items:str}}};
+}
+const K_SYSTEM=`너는 블라인드·커튼 가게의 주문 접수 담당이다. 카카오톡 대화 캡처나 글자에서 고객이 주문한 창(품목)을 하나씩 뽑아 아래 단가표의 이름으로 맞춘다.
+- 창 하나(또는 같은 규격 여러 개)가 items 한 줄이다. 인사·잡담·가격 문의만 있는 말은 품목이 아니다.
+- 크기는 cm로 적는다. "180*150", "180x150", "가로180 세로150"은 가로 180, 세로 150이다. 1000이 넘는 숫자처럼 mm로 보이면 10으로 나눈다. 모르는 값은 0.
+- product_id, material, color, 선택 항목 값은 단가표에 있는 글자 그대로 쓴다. "암막롤"→롤스크린의 암막 원단처럼 가장 가까운 것을 고르고, 정말 알 수 없으면 material·color는 빈 글자로 둔다.
+- location은 거실·안방 같은 설치 위치, 없으면 빈 글자. qty는 개수, 없으면 1.
+- options에는 주문에 언급된 선택 항목만 넣는다 (예: 전동, 우측 손잡이, 천장 설치).
+- source_text에는 그 품목의 근거가 된 원래 문장을 짧게 옮긴다.
+- 고객 이름·연락처·주소가 보이면 customer에, 없으면 빈 글자.
+- 애매하거나 확인이 필요한 점은 notes에 한국어 한 줄씩 적는다.`;
+
+$('#kRead').onclick=async()=>{
+  const key=$('#kKey').value.trim(),text=$('#kText').value.trim();
+  if(!kImgs.length&&!text)return toast('사진을 올리거나 글자를 붙여 넣으세요');
+  if(!key)return toast('Claude API 키를 넣어 주세요'),$('#kKey').focus();
+  keySet(key);kKeyState();
+  const btn=$('#kRead');btn.disabled=true;btn.textContent='읽는 중…';$('#kStatus').textContent='Claude가 주문 내용을 읽고 있습니다. 사진이 많으면 30초 이상 걸릴 수 있습니다.';
+  try{
+    AnthropicSDK??=(await import(SDK_URL)).default;
+    const client=new AnthropicSDK({apiKey:key,dangerouslyAllowBrowser:true});   // 사용자 본인 키, 이 브라우저에서만 사용
+    const content=[];
+    kImgs.forEach((d,i)=>d.parts.forEach((p,j)=>{
+      content.push({type:'text',text:`${i+1}번 사진${d.parts.length>1?` (${j+1}/${d.parts.length} 조각, 위아래가 조금 겹침 — 겹친 줄은 한 번만 세기)`:''}`});
+      content.push({type:'image',source:{type:'base64',media_type:'image/jpeg',data:p}});
+    }));
+    content.push({type:'text',text:`${text?`카톡 글자:\n${text}\n\n`:''}단가표:\n${kCatalog()}\n\n설치 위치 목록: ${locs().join(', ')}\n\n위 주문을 품목 줄로 정리해 줘.`});
+    const res=await client.beta.messages.create({
+      model:'claude-opus-5-5',max_tokens:16000,
+      betas:['server-side-fallback-2026-07-01'],fallbacks:'default',   // 안전 분류기가 거절하면 서버가 다른 모델로 다시 시도
+      output_config:{effort:'medium',format:{type:'json_schema',schema:kSchema()}},
+      system:K_SYSTEM,messages:[{role:'user',content}]
+    });
+    if(res.stop_reason==='refusal')throw new Error('Claude가 이 요청을 처리하지 않았습니다. 다른 사진으로 다시 시도해 주세요.');
+    if(res.stop_reason==='max_tokens')throw new Error('주문이 너무 길어 끝까지 읽지 못했습니다. 사진을 나눠서 올려 주세요.');
+    const t=res.content.find(b=>b.type==='text');
+    const data=JSON.parse(t.text);
+    kCust=data.customer;kItems=data.items.map(kMatch);
+    kShow(data.notes||[]);
+  }catch(err){
+    const A=AnthropicSDK;let msg=err.message||String(err);
+    if(A&&err instanceof A.AuthenticationError)msg='API 키가 맞지 않습니다. 키를 확인해 주세요.';
+    else if(A&&err instanceof A.PermissionDeniedError)msg='이 키로는 해당 모델을 쓸 수 없습니다.';
+    else if(A&&err instanceof A.RateLimitError)msg='요청이 많아 잠시 막혔습니다. 1분 뒤 다시 시도해 주세요.';
+    else if(A&&err instanceof A.BadRequestError)msg='요청이 거절되었습니다: '+(err.error?.error?.message||err.message);
+    else if(A&&err instanceof A.APIConnectionError)msg='Claude 서버에 연결하지 못했습니다. 인터넷 연결을 확인해 주세요.';
+    else if(A&&err instanceof A.APIError)msg=`Claude 서버 오류(${err.status??'?'}): 잠시 뒤 다시 시도해 주세요.`;
+    else if(err instanceof SyntaxError)msg='읽은 결과를 해석하지 못했습니다. 다시 시도해 주세요.';
+    else if(!A)msg='Claude 연결 모듈을 불러오지 못했습니다. 인터넷 연결을 확인해 주세요.';
+    $('#kStatus').innerHTML=`<span style="color:var(--danger)">${esc(msg)}</span>`;
+  }finally{btn.disabled=false;btn.textContent='주문 읽기';}
+};
+/* Claude가 준 이름을 단가표와 맞춰 보고, 안 맞으면 기본값으로 바꾸고 표시 */
+function kMatch(it){
+  const [c,s]=it.product_id.split('/'),S=sub(c,s),warn=[];
+  const l=fillDefaults({id:uid(),chk:false,cat:c,sub:s,loc:'',w:'',h:'',qty:Math.max(1,it.qty||1)});
+  const m=S.materials.find(x=>x.name===it.material);
+  if(m){l.mat=m.name;l.type=m.type;l.color=parseList(m.colors)[0]?.name||'';}else warn.push('원단');
+  const col=parseList((m||S.materials[0]).colors).find(x=>x.name===it.color);
+  if(col)l.color=col.name;else if(it.color||!m)warn.push('색상');
+  if(locs().includes(it.location))l.loc=it.location;
+  if(S.mode!=='ea'&&it.width_cm>0)l.w=+it.width_cm.toFixed(1);
+  if(S.mode==='m2'&&it.height_cm>0)l.h=+it.height_cm.toFixed(1);
+  (it.options||[]).forEach(o=>{if((S.extras||[]).includes(o.key)&&parseList(cfg.extras[o.key].items).some(x=>x.name===o.value))l.ex[o.key]=o.value;});
+  return {line:l,src:it.source_text,warn,on:true};
+}
+function kShow(notes){
+  $('#kStatus').textContent=kItems.length?`${kItems.length}개 품목을 찾았습니다. 확인 후 [선택한 줄 추가]를 누르세요. 빨간 글씨는 단가표에서 못 찾아 기본값을 넣은 칸입니다.`:'주문 품목을 찾지 못했습니다.';
+  const c=kCust,cust=c&&(c.name||c.phone||c.address)?`<p class="hint">고객: ${esc([c.name,c.phone,c.address].filter(Boolean).join(' · '))} <label><input type="checkbox" id="kCustOn" checked> 고객 정보에 넣기</label></p>`:'';
+  $('#kResult').innerHTML=cust+(kItems.length?`<table class="kt"><colgroup><col style="width:4%"><col style="width:22%"><col style="width:12%"><col style="width:16%"><col style="width:11%"><col style="width:9%"><col style="width:12%"><col style="width:7%"><col style="width:7%"></colgroup>
+    <thead><tr><th></th><th>카톡 원문</th><th>상품</th><th>원단</th><th>색상</th><th>위치</th><th>가로×세로(cm)</th><th>수량</th><th>단가</th></tr></thead><tbody>${
+    kItems.map((k,i)=>{const l=k.line,S=sub(l.cat,l.sub),p=calc(l),w=f=>k.warn.includes(f)?' class="warn"':'';
+      return `<tr><td><input type="checkbox" data-kon="${i}"${k.on?' checked':''}></td><td class="src">${esc(k.src)}</td><td>${esc(S.name)}</td><td${w('원단')}>${esc(l.mat)}</td><td${w('색상')}>${esc(l.color)}</td><td>${esc(l.loc)||'—'}</td>
+        <td${(S.mode!=='ea'&&!l.w)||(S.mode==='m2'&&!l.h)?' class="warn"':''}>${S.mode==='ea'?'—':`${l.w||'?'}${S.mode==='m2'?` × ${l.h||'?'}`:''}`}</td><td>${l.qty}</td><td>${p.ok?won(p.unit):'-'}</td></tr>`;}).join('')}</tbody></table>`:'')
+    +(notes.length?`<p class="hint"><b>확인할 점</b><br>${notes.map(esc).join('<br>')}</p>`:'');
+  $('#kApply').hidden=!kItems.length;
+}
+$('#kResult').addEventListener('change',e=>{const i=e.target.dataset.kon;if(i!==undefined)kItems[+i].on=e.target.checked;});
+$('#kApply').onclick=()=>{
+  const add=kItems.filter(k=>k.on).map(k=>k.line);if(!add.length)return toast('추가할 줄을 선택하세요');
+  /* 비어 있는 첫 줄 하나만 있으면 그 줄은 지우고 넣음 */
+  if(st.lines.length===1&&!st.lines[0].w&&!st.lines[0].h)st.lines=[];
+  st.lines.push(...add);
+  if($('#kCustOn')?.checked){const c=kCust;if(c.name&&!st.cust.name)st.cust.name=c.name;if(c.phone&&!st.cust.phone)st.cust.phone=c.phone;if(c.address&&!st.cust.addr)st.cust.addr=c.address;}
+  renderLines();$('#kakaoModal').classList.remove('on');toast(`${add.length}줄을 추가했습니다. 크기가 빈 줄은 직접 채워 주세요.`);
+};
 
 /* ===== 모달 공통 ===== */
 $$('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m||e.target.matches('[data-close]'))m.classList.remove('on');}));
